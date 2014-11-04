@@ -12,8 +12,10 @@ extern "C"
 #include <conio.h>
 #include <process.h>
 #include <stdlib.h>
+#include <time.h>
 #include <windows.h>
 #include "rDeviceBioTacCheetahDef.h"
+#include "PlotExporter.h"
 
 /************************************/
 /* --- BioTac: Define variables --- */
@@ -31,6 +33,9 @@ bool InitializeBioTac();
 void TerminateBioTac();
 void ProcessMessage(bt_data* data, int number_of_samples);
 void DumpBioTacData();
+void InitializeDAQ();
+void TerminateDAQ();
+void SaveBioTacData();
 
 /************************************/
 /* --- BioTac: I/O thread       --- */
@@ -39,12 +44,16 @@ uintptr_t _ioThreadCheetah;
 bool _ioThreadCheetahRun;
 unsigned int __stdcall ioThreadCheetah(void* inst);
 
+/************************************/
+/* --- BioTac: Data acquisition --- */
+/************************************/
+int _port = 0;
+PlotExporter* _daq = NULL;
+bool _daq_activated = false;
+
+
 int _tmain(int argc, _TCHAR* argv[])
 {
-	//////////////////////////////////////////////////////////////
-	// print out some instructions
-	PrintInstruction();
-
 	//////////////////////////////////////////////////////////////
 	// initialize communication with BioTac sensors
 	if (!InitializeBioTac()) {
@@ -53,7 +62,11 @@ int _tmain(int argc, _TCHAR* argv[])
 		getch();
 		return false;
 	}
-	
+
+	//////////////////////////////////////////////////////////////
+	// print out some instructions
+	PrintInstruction();
+
 	//////////////////////////////////////////////////////////////
 	// run main-loop to gather data from sensors
 	bool bRun = true;
@@ -77,6 +90,14 @@ int _tmain(int argc, _TCHAR* argv[])
 			case 'P':
 				DumpBioTacData();
 				break;
+			case 's':
+			case 'S':
+				InitializeDAQ();
+				break;
+			case 'f':
+			case 'F':
+				TerminateDAQ();
+				break;
 			case 'q':
 			case 'Q':
 				bRun = false;
@@ -87,6 +108,7 @@ int _tmain(int argc, _TCHAR* argv[])
 
 	//////////////////////////////////////////////////////////////
 	// terminate program
+	TerminateDAQ();
 	TerminateBioTac();
 	printf("Press any key to quit...");
 	getch();
@@ -95,6 +117,7 @@ int _tmain(int argc, _TCHAR* argv[])
 
 void PrintInstruction()
 {
+	printf("\n\n");
 	printf("********** BioTac sample program ********\n");
 	printf("*                                       *\n");
 	printf("*      Copyrights SimLab Co., Ltd.      *\n");
@@ -103,6 +126,8 @@ void PrintInstruction()
 	printf("\n");
 	printf("Press \'q\' to quit this program.\n");
 	printf("Press \'p\' to print current sensor value.\n");
+	printf("Press \'s\' to start saving sensor values.\n");
+	printf("Press \'f\' to finish saving sensor values and save it as a file.\n");
 	printf("\n");
 }
 
@@ -224,27 +249,96 @@ void ProcessMessage(bt_data* data, int number_of_samples)
 
 void DumpBioTacData()
 {
-	int port = 0;
-
 	printf("\n\n");
 	printf("=====================================================================\n");
 	printf("Pac/Pdc/Tac/Tdc/HallSensor : ");	
-	printf("%6d", _data->frame[port].sample[BT_CHNL_Pac].d.word);
-	printf("%6d", _data->frame[port].sample[BT_CHNL_Pdc].d.word);
-	printf("%6d", _data->frame[port].sample[BT_CHNL_Tac].d.word);
-	printf("%6d", _data->frame[port].sample[BT_CHNL_Tdc].d.word);
-	printf("%6d", _data->frame[port].sample[BT_CHNL_HallSensor].d.word);
+	printf("%6d", _data->frame[_port].sample[BT_CHNL_Pac].d.word);
+	printf("%6d", _data->frame[_port].sample[BT_CHNL_Pdc].d.word);
+	printf("%6d", _data->frame[_port].sample[BT_CHNL_Tac].d.word);
+	printf("%6d", _data->frame[_port].sample[BT_CHNL_Tdc].d.word);
+	printf("%6d", _data->frame[_port].sample[BT_CHNL_HallSensor].d.word);
 	printf("\n");
 
 	printf("Elec1 ~ Elec9    : ");
 	for (int i=BT_CHNL_Electrod1; i<=BT_CHNL_Electrod9; i++)
-		printf("%6d", _data->frame[port].sample[i].d.word);
+		printf("%6d", _data->frame[_port].sample[i].d.word);
 	printf("\n");
 
 	printf("Elec10 ~ Elec19  : ");
 	for (int i=BT_CHNL_Electrod10; i<=BT_CHNL_Electrod19; i++)
-		printf("%6d", _data->frame[port].sample[i].d.word);
+		printf("%6d", _data->frame[_port].sample[i].d.word);
 	printf("\n");
+}
+
+
+void InitializeDAQ()
+{
+	if (_daq) {
+		printf("Fail to create a data file. DAQ is already activated.\n");
+		return;
+	}
+
+	const int ncols = 24;
+	const char* cols[ncols] = {"Pac", "Pdc", "Tac", "Tdc", "HallSensor", 
+		"Elec1", "Elec2", "Elec3", "Elec4", "Elec5", "Elec6", "Elec7", "Elec8", "Elec9",
+		"Elec10", "Elec11", "Elec12", "Elec13", "Elec14", "Elec15", "Elec16", "Elec17", "Elec18", "Elec19"
+	};
+	// attach time & date
+	time_t timer;
+	char szfilename[256];
+	struct tm tm_info;
+	time(&timer);
+	localtime_s(&tm_info, &timer);
+	strftime(szfilename, 256, "biotac_%Y%m%d%H%M%S", &tm_info);
+	printf("start to acquisit sensor data...");
+	printf("press \'f\' to stop and save it to a file, \'%s\'.\n", szfilename);
+	_daq = new PlotExporter(szfilename, ncols, cols, false);
+	_daq_activated = true;
+}
+
+void TerminateDAQ()
+{
+	if (!_daq_activated)
+		return;
+
+	printf("sensor data is saved to a file.\n");
+	_daq_activated = false;
+	_daq->Flush();
+	delete _daq;
+	_daq = NULL;
+}
+
+void SaveBioTacData()
+{
+	if (!_daq_activated)
+		return;
+
+	_daq->AppendData("%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+		_data->frame[_port].sample[BT_CHNL_Pac].d.word,
+		_data->frame[_port].sample[BT_CHNL_Pdc].d.word,
+		_data->frame[_port].sample[BT_CHNL_Tac].d.word,
+		_data->frame[_port].sample[BT_CHNL_Tdc].d.word,
+		_data->frame[_port].sample[BT_CHNL_HallSensor].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod1].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod2].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod3].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod4].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod5].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod6].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod7].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod8].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod9].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod10].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod11].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod12].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod13].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod14].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod15].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod16].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod17].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod18].d.word,
+		_data->frame[_port].sample[BT_CHNL_Electrod19].d.word
+		);
 }
 
 unsigned int __stdcall ioThreadCheetah(void* inst)
@@ -292,6 +386,7 @@ unsigned int __stdcall ioThreadCheetah(void* inst)
 			// To print out data on Terminal, set the fourth argument to YES (NO by default)
 			bt_cheetah_collect_batch(ch_handle, &biotac, data, NO);
 			ProcessMessage(data, number_of_samples);
+			SaveBioTacData();
 		}
 		bt_reset_save_buffer();
 	}

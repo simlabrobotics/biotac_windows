@@ -235,6 +235,10 @@
 				>
 			</File>
 			<File
+				RelativePath=".\PlotExporter.h"
+				>
+			</File>
+			<File
 				RelativePath=".\rDeviceBioTacCheetahDef.h"
 				>
 			</File>
